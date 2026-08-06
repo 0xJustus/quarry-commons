@@ -1,0 +1,11 @@
+# Allowlist for autovet.yml — the entries re-vetted on the Fly substrate.
+# Copy to autovet-allow.yaml and fill in real targets. Each entry is one target
+# image whose baked-in reproducer (or supplied argv) the oracle re-runs air-gapped
+# on an ephemeral Fly Machine; only an observed run admits or rejects.
+entries:
+  - id: example-arvo-12345
+    image: registry.fly.io/quarry-vetd-targets:arvo-12345   # pushed per-target image
+    binary: /out/fuzzer                                       # in-image binary to run
+    argv: ["/out/fuzzer", "{poc}"]                            # {poc} = reproducer path; omit if baked in
+    nopov: false                                              # true when the reproducer is baked into the image
+    sanitizer: asan

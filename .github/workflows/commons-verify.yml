@@ -1,0 +1,47 @@
+# The anti-poisoning gate. Runs the whole-tree consistency audit on every PR and
+# push, and blocks merge unless it passes: content-addressed + signature-valid
+# abstracts, no specimen or reproducer, Public tier only, an index bound to real
+# artifacts and correctly sharded, and a Bloom digest byte-identical to the
+# canonical digest of the indexed keys.
+name: commons-verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commons-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pin to a pushed quarry core commit; bump deliberately (the gate's integrity is
+  # the binary's). The tree that ships must pass THIS binary's gate.
+  QUARRY_REF: 235cd4c66e3938158d661de391de0e8496292529
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-quarry
+        with:
+          ref: ${{ env.QUARRY_REF }}
+          token: ${{ secrets.QUARRY_REPO_TOKEN }}
+      - name: anti-poisoning gate
+        run: |
+          set -euo pipefail
+          # commons.verify returns {ok:false, failures:[...]} WITHOUT erroring, so
+          # the exit code alone is not the verdict — parse .ok and fail closed.
+          result="$(quarry call commons.verify '{"dir":"."}' \
+            --audit "$RUNNER_TEMP/audit.jsonl" --principal ci-gate)"
+          echo "$result" | jq .
+          if [ "$(printf '%s' "$result" | jq -r '.ok')" != "true" ]; then
+            echo "::error::commons anti-poisoning gate FAILED"
+            printf '%s' "$result" | jq -r '.failures[]? | "  - " + .' >&2
+            exit 1
+          fi
+          echo "gate OK: $(printf '%s' "$result" | jq -r '"\(.artifacts) artifacts / \(.keys) keys"')"

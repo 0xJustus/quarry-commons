@@ -1,0 +1,75 @@
+# The automated artifact-validation leg (ADR-0002 quarry-vetd controller).
+# Re-vets an allowlist of reproducer-bearing entries on the per-PoV Fly Machine
+# substrate — each runs air-gapped (egress denied) on an ephemeral Machine, never
+# on this runner — and records admit/reject verdicts back into the tree.
+#
+# Dispatch-triggered only (never on a PR): repository_dispatch {type: autovet} or
+# manually. Prerequisites: an FLY_API_TOKEN secret, the quarry-vetd Fly app, and
+# per-target images pushed to registry.fly.io. See .github/README.md.
+name: autovet
+
+on:
+  repository_dispatch:
+    types: [autovet]
+  workflow_dispatch:
+    inputs:
+      allowlist:
+        description: "allowlist YAML of entries to re-vet on the substrate"
+        default: "autovet-allow.yaml"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: autovet
+  cancel-in-progress: false
+
+env:
+  QUARRY_REF: 235cd4c66e3938158d661de391de0e8496292529
+
+jobs:
+  autovet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-quarry
+        with:
+          ref: ${{ env.QUARRY_REF }}
+          token: ${{ secrets.QUARRY_REPO_TOKEN }}
+      - name: re-vet the allowlist on the Fly substrate
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          file="${{ github.event.inputs.allowlist || github.event.client_payload.allowlist || 'autovet-allow.yaml' }}"
+          [ -f "$file" ] || { echo "::error::allowlist '$file' not found"; exit 1; }
+          # the allowlist is a YAML list of autovet entries
+          # (id, image, binary, argv, nopov, sanitizer); the op takes them as JSON.
+          entries="$(yq -o=json -I=0 '.entries // .' "$file")"
+          result="$(quarry call autovet "{\"entries\":$entries,\"tree\":\".\"}" \
+            --audit "$RUNNER_TEMP/audit.jsonl" --principal ci-autovet)"
+          echo "$result" | jq .
+          if ! printf '%s' "$result" | jq -e '.total > 0' >/dev/null; then
+            echo "::error::autovet vetted no entries"; exit 1
+          fi
+      - name: verify tree still passes the gate (fail closed)
+        run: |
+          set -euo pipefail
+          result="$(quarry call commons.verify '{"dir":"."}' \
+            --audit "$RUNNER_TEMP/audit.jsonl" --principal ci-autovet)"
+          [ "$(printf '%s' "$result" | jq -r '.ok')" = "true" ] || {
+            echo "::error::tree failed the gate after autovet — not committing"
+            printf '%s' "$result" | jq -r '.failures[]? | "  - " + .' >&2; exit 1; }
+      - name: commit the verdict ledger
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "no ledger change"; exit 0
+          fi
+          git config user.name  "quarry-autovet[bot]"
+          git config user.email "quarry-autovet@users.noreply.github.com"
+          git add -A
+          git commit -m "autovet: substrate re-vet verdicts (run ${{ github.run_id }})"
+          git push

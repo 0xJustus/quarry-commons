@@ -1,0 +1,49 @@
+name: setup-quarry
+description: >
+  Build the quarry core binary from a pinned ref and put it on PATH. Clones into
+  RUNNER_TEMP (outside the workspace) so it never lands in a commons commit.
+
+inputs:
+  ref:
+    description: quarry commit sha or tag to build. Pin this deliberately.
+    required: true
+  repo:
+    description: owner/name of the quarry core repository.
+    required: false
+    default: 0xJustus/quarry
+  token:
+    description: >
+      Read token for the quarry core repo (a fine-grained PAT or deploy key).
+      Required while the core repo is private; leave empty once it is public.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: stable
+    - name: build quarry from the pinned ref
+      shell: bash
+      env:
+        QUARRY_REPO: ${{ inputs.repo }}
+        QUARRY_REF: ${{ inputs.ref }}
+        QUARRY_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        dest="$RUNNER_TEMP/quarry-src"
+        if [ -n "$QUARRY_TOKEN" ]; then
+          origin="https://x-access-token:${QUARRY_TOKEN}@github.com/${QUARRY_REPO}.git"
+        else
+          origin="https://github.com/${QUARRY_REPO}.git"
+        fi
+        git init -q "$dest"
+        git -C "$dest" remote add origin "$origin"
+        git -C "$dest" -c protocol.version=2 fetch -q --depth 1 origin "$QUARRY_REF"
+        git -C "$dest" checkout -q FETCH_HEAD
+        # commons ops need no cgo; a pure-Go build needs no C toolchain and degrades
+        # only the tree-sitter paths, which these workflows never touch.
+        CGO_ENABLED=0 go build -C "$dest" -o "$RUNNER_TEMP/bin/quarry" ./cmd/quarry
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/bin/quarry" version

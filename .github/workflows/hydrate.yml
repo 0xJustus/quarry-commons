@@ -1,0 +1,69 @@
+# Scheduled regeneration of the tree from the ARVO catalog, verified before commit.
+# The catalog path is metadata-only — it runs no target code — so it is safe on a
+# GitHub-hosted runner. It verifies inline and fails closed because a push by the
+# default GITHUB_TOKEN does not itself trigger commons-verify.
+name: hydrate
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "cap entries for a test run (0 = whole corpus)"
+        default: "0"
+        required: false
+      allow_removals:
+        description: "permit a subtractive refresh (de-publish artifacts the batch drops). Scheduled runs are always fail-closed."
+        default: "false"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hydrate
+  cancel-in-progress: false
+
+env:
+  QUARRY_REF: 235cd4c66e3938158d661de391de0e8496292529
+
+jobs:
+  hydrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-quarry
+        with:
+          ref: ${{ env.QUARRY_REF }}
+          token: ${{ secrets.QUARRY_REPO_TOKEN }}
+      - name: regenerate tree from the ARVO catalog
+        run: |
+          set -euo pipefail
+          lim="${{ inputs.limit }}"; lim="${lim:-0}"
+          ar="${{ inputs.allow_removals }}"; ar="${ar:-false}"
+          quarry call catalog "{\"all\":true,\"tree\":\".\",\"limit\":$lim,\"allow_removals\":$ar}" \
+            --audit "$RUNNER_TEMP/audit.jsonl" --principal ci-hydrate | jq .
+      - name: verify before commit (fail closed)
+        run: |
+          set -euo pipefail
+          result="$(quarry call commons.verify '{"dir":"."}' \
+            --audit "$RUNNER_TEMP/audit.jsonl" --principal ci-hydrate)"
+          echo "$result" | jq .
+          if [ "$(printf '%s' "$result" | jq -r '.ok')" != "true" ]; then
+            echo "::error::regenerated tree failed the anti-poisoning gate — not committing"
+            printf '%s' "$result" | jq -r '.failures[]? | "  - " + .' >&2
+            exit 1
+          fi
+      - name: commit if changed
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "no change"; exit 0
+          fi
+          git config user.name  "quarry-hydrate[bot]"
+          git config user.email "quarry-hydrate@users.noreply.github.com"
+          git add -A
+          git commit -m "hydrate: refresh from ARVO catalog (run ${{ github.run_id }})"
+          git push
